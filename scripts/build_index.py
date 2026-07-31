@@ -4,6 +4,10 @@ build_index.py
 Generates sentence embeddings for every chunk in data/processed/chunks.json
 and builds a FAISS index for fast similarity search.
 
+Uses fastembed (ONNX Runtime) instead of sentence-transformers/PyTorch --
+same job, much lighter memory footprint, important for deploying on
+memory-constrained hosts like Render's free tier.
+
 Usage:
     python scripts/build_index.py
 
@@ -17,13 +21,14 @@ from pathlib import Path
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 CHUNKS_PATH = Path("data/processed/chunks.json")
 INDEX_PATH = Path("data/processed/faiss_index.bin")
 LOOKUP_PATH = Path("data/processed/chunk_lookup.json")
 
-MODEL_NAME = "all-MiniLM-L6-v2"  # small, fast, runs fully on CPU
+# 384-dim model, same family/size as the previous all-MiniLM-L6-v2 setup
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def build_embedding_text(chunk: dict) -> str:
@@ -39,6 +44,13 @@ def build_embedding_text(chunk: dict) -> str:
     )
 
 
+def normalize(vectors: np.ndarray) -> np.ndarray:
+    """L2-normalize so inner product == cosine similarity in FAISS."""
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1e-12
+    return vectors / norms
+
+
 def main():
     if not CHUNKS_PATH.exists():
         print(f"{CHUNKS_PATH} not found. Run scripts/extract_and_chunk.py first.")
@@ -48,33 +60,27 @@ def main():
         chunks = json.load(f)
 
     print(f"Loaded {len(chunks)} chunks.")
-    print(f"Loading embedding model ({MODEL_NAME}) ...")
-    model = SentenceTransformer(MODEL_NAME)
+    print(f"Loading embedding model ({MODEL_NAME}) via fastembed ...")
+    model = TextEmbedding(model_name=MODEL_NAME)
 
     texts = [build_embedding_text(c) for c in chunks]
 
-    print("Generating embeddings (this may take a minute on CPU) ...")
-    embeddings = model.encode(
-        texts,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=True,  # so we can use cosine similarity via inner product
-    )
-    embeddings = embeddings.astype("float32")
+    print("Generating embeddings (fastembed/ONNX, CPU) ...")
+    embeddings = list(model.embed(texts))
+    embeddings = np.array(embeddings, dtype="float32")
+    embeddings = normalize(embeddings)
 
     dimension = embeddings.shape[1]
     print(f"Embedding dimension: {dimension}")
 
     # IndexFlatIP = exact search via inner product; since vectors are
-    # normalized, inner product == cosine similarity. Simple and fast
-    # enough for a corpus this size (no need for approximate search).
+    # normalized, inner product == cosine similarity.
     index = faiss.IndexFlatIP(dimension)
     index.add(embeddings)
 
     faiss.write_index(index, str(INDEX_PATH))
     print(f"Wrote FAISS index to {INDEX_PATH.resolve()}")
 
-    # Save a parallel lookup so we can map a FAISS result row -> chunk metadata
     with open(LOOKUP_PATH, "w", encoding="utf-8") as f:
         json.dump(chunks, f, indent=2, ensure_ascii=False)
     print(f"Wrote chunk lookup to {LOOKUP_PATH.resolve()}")
@@ -84,4 +90,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

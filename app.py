@@ -12,16 +12,17 @@ import os
 from pathlib import Path
 
 import faiss
+import numpy as np
 import streamlit as st
 from dotenv import load_dotenv
+from fastembed import TextEmbedding
 from google import genai
-from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
 INDEX_PATH = Path("data/processed/faiss_index.bin")
 LOOKUP_PATH = Path("data/processed/chunk_lookup.json")
-EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 LLM_MODEL_NAME = "gemini-flash-latest"
 TOP_K = 5
 
@@ -43,11 +44,17 @@ lists for structure instead.
 """
 
 
+def normalize(vectors: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1e-9
+    return vectors / norms
+
+
 # ---- Cached resources: loaded once, reused across every user interaction ----
 
 @st.cache_resource
 def load_embed_model():
-    return SentenceTransformer(EMBED_MODEL_NAME)
+    return TextEmbedding(model_name=EMBED_MODEL_NAME)
 
 
 @st.cache_resource
@@ -71,7 +78,8 @@ def load_gemini_client():
 
 
 def retrieve(query, embed_model, index, chunks):
-    query_vec = embed_model.encode([query], normalize_embeddings=True).astype("float32")
+    query_vec = np.array(list(embed_model.embed([query])), dtype="float32")
+    query_vec = normalize(query_vec)
     scores, indices = index.search(query_vec, TOP_K)
     return [
         {**chunks[idx], "score": float(score)}
@@ -142,7 +150,6 @@ html, body, [class*="css"] {
     font-family: 'IBM Plex Sans', sans-serif;
 }
 
-/* Header block */
 .register-header {
     border-bottom: 2px solid #1F2A44;
     padding-bottom: 1rem;
@@ -173,7 +180,6 @@ html, body, [class*="css"] {
     line-height: 1.5;
 }
 
-/* Disclaimer strip */
 .disclaimer-strip {
     background: #E8E2D1;
     border-left: 3px solid #9C7A3C;
@@ -184,7 +190,6 @@ html, body, [class*="css"] {
     border-radius: 2px;
 }
 
-/* Citation badges */
 .cite-label {
     font-family: 'IBM Plex Mono', monospace;
     font-size: 0.68rem;
@@ -234,7 +239,6 @@ html, body, [class*="css"] {
     font-weight: 500;
 }
 
-/* Sidebar styling */
 [data-testid="stSidebar"] {
     background: #E8E2D1;
     border-right: 1px solid #C9C2AE;
@@ -263,8 +267,6 @@ html, body, [class*="css"] {
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# ---- Sidebar: corpus info (acts as a "register" of what the assistant knows) ----
-
 with st.sidebar:
     st.markdown('<div class="sidebar-label">CORPUS COVERAGE</div>', unsafe_allow_html=True)
     st.markdown(
@@ -283,8 +285,6 @@ with st.sidebar:
         "This assistant only answers from the acts listed above. "
         "Questions outside this scope will be declined rather than guessed."
     )
-
-# ---- Header ----
 
 st.markdown(
     """
@@ -310,25 +310,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Load resources once (cached)
 embed_model = load_embed_model()
 index, chunks = load_index_and_chunks()
 client = load_gemini_client()
 
-# ---- Chat history ----
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display previous conversation messages
 for msg in st.session_state.messages:
     avatar = "🧑‍💼" if msg["role"] == "user" else "💬"
     with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
         if msg["role"] == "assistant" and "sources" in msg:
             render_sources(msg["sources"])
-
-# ---- Chat input ----
 
 user_query = st.chat_input("e.g. How do I register a private limited company?")
 
