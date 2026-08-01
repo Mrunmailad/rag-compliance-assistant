@@ -85,6 +85,25 @@ CUTOFF_PATTERN = re.compile(
 )
 
 
+# Indian bare acts (not subordinate rules) list every section title in a
+# "Arrangement of Sections" table of contents at the very front of the PDF,
+# in perfect numeric order. This false-positively satisfies the monotonic
+# filter in split_into_sections, consuming the counter before any real
+# section body is ever reached -- meaning genuine section text later in
+# the document gets silently rejected as "not increasing". The standard
+# enacting-clause boilerplate below reliably marks where the real numbered
+# content begins, right after the table of contents ends.
+ENACTING_CLAUSE_PATTERN = re.compile(r"BE it enacted by Parliament", re.IGNORECASE)
+
+
+def skip_toc_and_preamble(text: str) -> str:
+    """Cut off everything before the Act's enacting clause, if present."""
+    match = ENACTING_CLAUSE_PATTERN.search(text)
+    if match:
+        return text[match.end():]
+    return text
+
+
 def truncate_before_forms(text: str) -> str:
     """Cut off the text at the first standalone Form/Annexure/Schedule heading, if any."""
     lines = text.split("\n")
@@ -173,6 +192,8 @@ def main():
 
         print(f"Processing {pdf_path.name} ...")
         raw_text = extract_pdf_text(pdf_path)
+        if meta["doc_type"] == "act":
+            raw_text = skip_toc_and_preamble(raw_text)
         raw_text = truncate_before_forms(raw_text)
         sections = split_into_sections(raw_text, max_section=meta["max_section"])
         print(f"  -> found {len(sections)} sections")
